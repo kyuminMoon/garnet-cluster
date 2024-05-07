@@ -1,14 +1,122 @@
 services:
-  garnet:
-    image: 'ghcr.io/microsoft/garnet'
+  garnet-m:
+    build:
+      #      context: ./app
+      dockerfile: DockerfileCluster
     ulimits:
       memlock: -1
     ports:
-      - "6379:6379"
+      - "6380:6379"
+#      - "3278:3278"
     # To avoid docker NAT, consider `host` mode.
     # https://docs.docker.com/compose/compose-file/compose-file-v3/#network_mode
     # network_mode: "host"
+    user: root
+    command: ./GarnetServer --cluster --checkpointdir='/data/' --aof
+    #    command: ["sh", "-c", "chmod 777 /data && exec ./GarnetServer --cluster --checkpointdir='/data/' --aof"]
     volumes:
       - garnetdata:/data
+      - ./AOF-m1:/data/AOF
+      - ./garnet.conf:/app/garnet.conf
+
+    networks:
+      - garnet-network
+
+  garnet-s1:
+    build:
+      #      context: ./app
+      dockerfile: DockerfileCluster
+    ulimits:
+      memlock: -1
+    ports:
+      - "6381:6379"
+#      - "3279:3278"
+    # To avoid docker NAT, consider `host` mode.
+    # https://docs.docker.com/compose/compose-file/compose-file-v3/#network_mode
+    # network_mode: "host"
+    user: root
+    volumes:
+      - garnetdata:/data
+      - ./AOF-s1:/data/AOF
+      - ./garnet.conf:/app/garnet.conf
+    command: ./GarnetServer --cluster --checkpointdir='/data/' --aof
+
+    networks:
+      - garnet-network
+  #    command: ["sh", "-c", "chmod 777 /data && exec ./GarnetServer --cluster --checkpointdir='/data/' --aof"]
+
+
+  garnet-s2:
+    build:
+      #      context: ./app
+      dockerfile: DockerfileCluster
+    ulimits:
+      memlock: -1
+    ports:
+      - "6382:6379"
+#      - "3280:3278"
+    # To avoid docker NAT, consider `host` mode.
+    # https://docs.docker.com/compose/compose-file/compose-file-v3/#network_mode
+    # network_mode: "host"
+    user: root
+    volumes:
+      - garnetdata:/data
+      - ./AOF-s2:/data/AOF
+      - ./garnet.conf:/app/garnet.conf
+    command: ./GarnetServer --cluster --checkpointdir='/data/' --aof
+
+    networks:
+      - garnet-network
+  #    command: ["sh", "-c", "chmod 777 /data && exec ./GarnetServer --cluster --checkpointdir='/data/' --aof"]
+
+
+
+  redis-cli:
+    container_name: redis-cli
+    image: redis:latest
+    depends_on:
+      - garnet-m
+      - garnet-s1
+      - garnet-s2
+    entrypoint: /bin/sh
+    command: >
+      -c 'sleep 10;
+          echo "Configuring Redis Cluster...";
+          redis-cli -h garnet-m -p 6379 cluster addslots $(seq 0 16383);
+          redis-cli -h garnet-m -p 6379 cluster set-config-epoch 1;
+          redis-cli -h garnet-s1 -p 6379 cluster set-config-epoch 2;
+          redis-cli -h garnet-s2 -p 6379 cluster set-config-epoch 3;
+          redis-cli -h garnet-m -p 6379 cluster meet garnet-s1 6379;
+          redis-cli -h garnet-m -p 6379 cluster meet garnet-s2 6379;
+          redis-cli -h garnet-s1 -p 6379 cluster replicate $(redis-cli -h garnet-m -p 6379 cluster myid);
+          redis-cli -h garnet-s2 -p 6379 cluster replicate $(redis-cli -h garnet-m -p 6379 cluster myid);
+          echo "Cluster setup complete."
+         '
+
+    networks:
+      - garnet-network
+  
+
+  sentinel:
+    build:
+      context: ./sentinel
+      dockerfile: Dockerfile
+    container_name: redis-sentinel
+    environment:
+      - SENTINEL_DOWN_AFTER=5000
+      - SENTINEL_FAILOVER=5000
+    depends_on:
+      - garnet-m
+      - garnet-s1
+      - garnet-s2
+      - redis-cli
+
+    networks:
+      - garnet-network
+
 volumes:
   garnetdata:
+
+networks:
+  garnet-network:
+    driver: bridge
