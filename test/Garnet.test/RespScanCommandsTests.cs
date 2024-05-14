@@ -15,11 +15,14 @@ namespace Garnet.test
     public class RespScanCommandsTests
     {
         GarnetServer server;
+        private IReadOnlyDictionary<string, RespCommandsInfo> respCustomCommandsInfo;
 
         [SetUp]
         public void Setup()
         {
             TestUtils.DeleteDirectory(TestUtils.MethodTestDir, wait: true);
+            Assert.IsTrue(TestUtils.TryGetCustomCommandsInfo(out respCustomCommandsInfo));
+            Assert.IsNotNull(respCustomCommandsInfo);
             server = TestUtils.CreateGarnetServer(TestUtils.MethodTestDir);
             server.Start();
         }
@@ -78,6 +81,29 @@ namespace Garnet.test
 
             actualResponse = db.Execute("KEYS", ["*"]);
             Assert.AreEqual(4, ((RedisResult[])actualResponse).Length);
+        }
+
+        [Test]
+        public void SeKeysCursorTest()
+        {
+            // Test a large number of keys
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+
+            // set 10_000 strings
+            const int KeyCount = 10_000;
+            for (int i = 0; i < KeyCount; ++i)
+                db.StringSet($"try:{i}", i);
+
+            // get and count keys using SE Redis, using the default pageSize of 250
+            var server = redis.GetServers()[db.Database];
+            var keyCount1 = server.Keys().ToArray().Length;
+            Assert.AreEqual(KeyCount, keyCount1, "IServer.Keys()");
+
+            // get and count keys using KEYS
+            var res = db.Execute("KEYS", "*");
+            var keyCount2 = ((RedisValue[])res!).Length;
+            Assert.AreEqual(KeyCount, keyCount2, "KEYS *");
         }
 
         [Test]
@@ -458,21 +484,21 @@ namespace Garnet.test
 
             for (int i = 0; i < nKeys; i++)
             {
-                db.SortedSetAdd(new RedisKey($"sskey:{i}"), [new SortedSetEntry("a", 1)]);
+                _ = db.SortedSetAdd(new RedisKey($"sskey:{i}"), [new SortedSetEntry("a", 1)]);
             }
 
-            int cursor = 0;
+            long cursor = 0;
             int recordsReturned = 0;
 
             do
             {
                 var result = db.Execute("SCAN", cursor.ToString());
-                _ = int.TryParse(((RedisValue[])((RedisResult[])result!)[0])[0], out cursor);
+                _ = long.TryParse(((RedisValue[])((RedisResult[])result!)[0])[0], out cursor);
                 RedisValue[] keysMatch = ((RedisValue[])((RedisResult[])result!)[1]);
                 recordsReturned += keysMatch.Length;
             } while (cursor != 0);
 
-            Assert.IsTrue(recordsReturned == nKeys * 3);
+            Assert.AreEqual(nKeys * 3, recordsReturned, "records returned");
         }
 
 
@@ -526,8 +552,8 @@ namespace Garnet.test
             // create a custom object
             var factory = new MyDictFactory();
 
-            server.Register.NewCommand("MYDICTSET", 2, CommandType.ReadModifyWrite, factory);
-            server.Register.NewCommand("MYDICTGET", 1, CommandType.Read, factory);
+            server.Register.NewCommand("MYDICTSET", 2, CommandType.ReadModifyWrite, factory, respCustomCommandsInfo["MYDICTSET"]);
+            server.Register.NewCommand("MYDICTGET", 1, CommandType.Read, factory, respCustomCommandsInfo["MYDICTGET"]);
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
